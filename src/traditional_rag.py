@@ -1,4 +1,4 @@
-"""Traditional (Naive) single-shot RAG pipeline."""
+"""Traditional (Naive) single-shot RAG pipeline with token usage tracking."""
 
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ class TraditionalRagResult:
     retrieved_distances: list[float]
     retrieval_calls: int
     llm_calls: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
     elapsed_s: float
 
 
@@ -38,6 +41,17 @@ def extract_text(content: Any) -> str:
     return str(content).strip()
 
 
+def extract_token_usage(message: Any) -> tuple[int, int, int]:
+    """Return (input_tokens, output_tokens, total_tokens) from a LangChain AIMessage."""
+    usage = getattr(message, "usage_metadata", None) or {}
+    if not isinstance(usage, dict):
+        return 0, 0, 0
+    in_tok = int(usage.get("input_tokens", 0) or 0)
+    out_tok = int(usage.get("output_tokens", 0) or 0)
+    tot_tok = int(usage.get("total_tokens", in_tok + out_tok) or (in_tok + out_tok))
+    return in_tok, out_tok, tot_tok
+
+
 def ask_traditional_rag(
     question: str,
     store: Chroma,
@@ -46,7 +60,7 @@ def ask_traditional_rag(
     model_name: str = DEFAULT_CHAT_MODEL,
 ) -> TraditionalRagResult:
     """Always retrieve top-k chunks once, then make one LLM call."""
-    chat = llm or ChatGoogleGenerativeAI(model=model_name, temperature=0)
+    chat = llm or ChatGoogleGenerativeAI(model=model_name, timeout=45, max_retries=3)
 
     t0 = time.perf_counter()
     hits = store.similarity_search_with_score(question, k=k)
@@ -64,6 +78,7 @@ def ask_traditional_rag(
     ]
     response = chat.invoke(messages)
     elapsed_s = time.perf_counter() - t0
+    in_tok, out_tok, tot_tok = extract_token_usage(response)
 
     return TraditionalRagResult(
         question=question,
@@ -72,5 +87,8 @@ def ask_traditional_rag(
         retrieved_distances=[round(float(dist), 4) for _, dist in hits],
         retrieval_calls=1,
         llm_calls=1,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        total_tokens=tot_tok,
         elapsed_s=elapsed_s,
     )

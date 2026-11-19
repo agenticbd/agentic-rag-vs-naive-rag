@@ -7,9 +7,10 @@ import hashlib
 from langchain_core.embeddings import Embeddings
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.agentic_rag import create_search_tool, extract_tool_steps
-from src.corpus import build_vectorstore, get_sample_documents, split_documents
-from src.traditional_rag import ask_traditional_rag, extract_text
+from src.agentic_rag import ask_agentic_rag, create_rag_tools, extract_tool_steps
+from src.benchmark import is_correct
+from src.corpus import build_vectorstore, get_sample_documents, list_document_sources, split_documents
+from src.traditional_rag import ask_traditional_rag, extract_text, extract_token_usage
 
 
 class DeterministicHashEmbeddings(Embeddings):
@@ -35,7 +36,7 @@ class DeterministicHashEmbeddings(Embeddings):
 
 
 class StubChatModel:
-    """Minimal chat model stub for testing Traditional RAG control flow offline."""
+    """Minimal chat model stub with usage_metadata for testing Traditional RAG offline."""
 
     def __init__(self, reply: str) -> None:
         self.reply = reply
@@ -43,18 +44,55 @@ class StubChatModel:
 
     def invoke(self, messages):
         self.last_messages = messages
-        return AIMessage(content=self.reply)
+        return AIMessage(
+            content=self.reply,
+            usage_metadata={"input_tokens": 110, "output_tokens": 12, "total_tokens": 122},
+        )
+
+
+class StubAgent:
+    """Minimal agent stub verifying recursion_limit config and token aggregation."""
+
+    def __init__(self) -> None:
+        self.last_config = None
+
+    def invoke(self, payload, config=None):
+        self.last_config = config
+        return {
+            "messages": [
+                HumanMessage(content=payload["messages"][0][1]),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "call_1", "name": "search_docs", "args": {"query": "Project Zephyr"}}
+                    ],
+                    usage_metadata={"input_tokens": 150, "output_tokens": 20, "total_tokens": 170},
+                ),
+                ToolMessage(
+                    content="[source=architecture_codenames.md distance=0.3100]\nProject Zephyr -> Async Billing Pipeline",
+                    tool_call_id="call_1",
+                ),
+                AIMessage(
+                    content="90 seconds",
+                    usage_metadata={"input_tokens": 240, "output_tokens": 10, "total_tokens": 250},
+                ),
+            ]
+        }
 
 
 def test_corpus_and_chunking():
     docs = get_sample_documents()
-    assert len(docs) == 5
+    assert len(docs) == 12
+    sources = list_document_sources(docs)
+    assert "architecture_codenames.md" in sources
+    assert "webhook_relay_limits.md" in sources
+    assert "database_failover.md" in sources
     chunks = split_documents(docs)
-    assert len(chunks) == 5
+    assert len(chunks) == 12
     assert all("source" in c.metadata for c in chunks)
 
 
-def test_traditional_rag_always_retrieves(tmp_path):
+def test_traditional_rag_always_retrieves_and_counts_tokens(tmp_path):
     store = build_vectorstore(
         persist_directory=tmp_path / "chroma",
         collection_name="test_trad",
@@ -67,39 +105,40 @@ def test_traditional_rag_always_retrieves(tmp_path):
     assert res.answer == "120 req/min"
     assert res.retrieval_calls == 1
     assert res.llm_calls == 1
+    assert res.total_tokens == 122
     assert len(res.retrieved_sources) == 2
     assert stub.last_messages is not None
 
 
-def test_search_tool_and_step_extraction(tmp_path):
+def test_rag_tools_and_agent_metrics(tmp_path):
     store = build_vectorstore(
         persist_directory=tmp_path / "chroma",
         collection_name="test_agent",
         embedding_function=DeterministicHashEmbeddings(),
         rebuild=True,
     )
-    search_tool = create_search_tool(store, k=2)
+    list_tool, search_tool = create_rag_tools(store, k=2)
+    sources_str = list_tool.invoke({})
+    assert "architecture_codenames.md" in sources_str
+    assert "webhook_relay_limits.md" in sources_str
+
     out = search_tool.invoke({"query": "Async Billing Pipeline cooldown"})
     assert "source=" in out
     assert "distance=" in out
 
     assert extract_text([{"type": "text", "text": "90 seconds"}]) == "90 seconds"
-    messages = [
-        HumanMessage(content="What is the circuit-breaker cooldown for Project Zephyr?"),
-        AIMessage(
-            content="",
-            tool_calls=[
-                {"id": "call_1", "name": "search_docs", "args": {"query": "Project Zephyr"}}
-            ],
-        ),
-        ToolMessage(
-            content="Project Zephyr is the internal codename for the Async Billing Pipeline.",
-            tool_call_id="call_1",
-        ),
-        AIMessage(content="90 seconds"),
-    ]
-    steps = extract_tool_steps(messages)
+    assert extract_token_usage(AIMessage(content="ok")) == (0, 0, 0)
+
+    stub_agent = StubAgent()
+    res = ask_agentic_rag("What is the cooldown for Project Zephyr?", stub_agent, recursion_limit=10)
+    assert stub_agent.last_config == {"recursion_limit": 10}
+    assert res.answer == "90 seconds"
+    assert res.retrieval_calls == 1
+    assert res.tool_calls == 1
+    assert res.llm_calls == 2
+    assert res.total_tokens == 420
+    assert res.steps[0].sources == ["architecture_codenames.md"]
+
+    steps = extract_tool_steps(stub_agent.invoke({"messages": [("user", "q")]})["messages"])
     assert len(steps) == 1
-    assert steps[0].tool_name == "search_docs"
-    assert steps[0].args == {"query": "Project Zephyr"}
-    assert "Async Billing Pipeline" in steps[0].result_preview
+    assert is_correct("Project Meridian is longer by 60 seconds.", (("meridian", "webhook relay"), ("60",)))
