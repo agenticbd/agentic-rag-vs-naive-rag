@@ -1,0 +1,19 @@
+[project]
+name = "agentic-rag-comparison"
+version = "0.1.0"
+description = "Reproducible side-by-side comparison of Traditional RAG vs. Agentic RAG using Gemini 3.5 Flash Lite."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.5.9",
+    "langchain>=1.5.0",
+    "langchain-chroma>=1.1.0",
+    "langchain-google-genai>=4.5.0",
+    "langchain-text-splitters>=1.1.3",
+    "langgraph>=1.2.22",
+    "pytest>=9.2.0",
+    "python-dotenv>=1.2.4",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
